@@ -1,0 +1,459 @@
+---
+title: "Scrapping"
+author: David Pitteloud, Alexandre Schroeter, Léonard Philippossian, Rita Sefraoui,
+  Simon Fornérod
+date: "07/12/2019"
+output: html_document
+---
+
+#Reddit scrapping 
+
+```{r, include=FALSE}
+#This is the library section to run the scrapping function
+library("magick")
+library("rcvg")
+library("RedditExtractoR")
+library("stringi")
+library("textmineR")
+library("tidyverse")
+
+
+```
+
+
+```{r, include = FALSE}
+
+#Modification of the actual function for links, add of the variable time_frame
+
+reddit_urls_mod<- function (search_terms = "", subreddit = "",
+                            sort_by = "", time_frame= "")
+{
+
+  if (subreddit == ""){
+    subreddit <- NA 
+  }
+  
+  if (search_terms == ""){
+    search_terms <- NA 
+  }
+  
+  if (!grepl("^[0-9A-Za-z]*$", subreddit) & !is.na(subreddit) ) {
+    stop("subreddit must be a sequence of letter and number without special characters and spaces")
+  }
+
+  regex_filter = ""
+  cn_threshold = 0
+  page_threshold = 15
+  wait_time = 1
+
+  cached_links = data.frame(date = as.Date(character()),
+                            num_comments = numeric(),
+                            title = character(),
+                            subreddit = character(),
+                            URL = character(),
+                            link = character())
+
+  if (sort_by != "front_page"){
+
+    if (!grepl("^comments$|^new$|^relevance$|^top$|^front_page$", sort_by)) {
+      stop("sort_by must be either 'new', 'comments', 'top', 'relevance' or 'front_page'")
+    }
+
+    if (!grepl("^hour$|^day$|^week$|^month$|^year$|^all$", time_frame)) {
+      stop("time_frame must be either 'hour', 'day', 'week', 'month', 'year or 'all'")
+    }
+
+
+    sterms = ifelse(is.na(search_terms), NA, gsub("\\s", "+",search_terms))
+
+    subreddit = ifelse(is.na(subreddit), "", paste0("r/", gsub("\\s+","+", subreddit), "/"))
+
+    sterms = ifelse(is.na(sterms), "", paste0("q=", sterms, "&restrict_sr=on&"))
+    sterms_prefix = ifelse(sterms == "", "new", "search")
+    time_frame_in = ifelse(is.na(search_terms), "", paste0("t=",time_frame,"&"))
+
+    search_address = search_query = paste0("https://www.reddit.com/",
+                                           subreddit, sterms_prefix,
+                                           ".json?",
+                                           sterms,time_frame_in,
+                                           "sort=",
+                                           sort_by)
+    
+  } else {
+    if (is.na(subreddit)) {
+      stop("if you choose sort_by = front_page please enter a subreddit")
+    }
+
+    search_address = search_query = paste0("https://www.reddit.com/r/",
+                                           subreddit,
+                                           ".json?")
+  }
+
+  next_page = index = ""
+  page_counter = 0
+  comm_filter = 10000
+  while (is.null(next_page) == FALSE & page_counter < page_threshold &
+         comm_filter >= cn_threshold & length(index) > 0) {
+    search_JSON = tryCatch(RJSONIO::fromJSON(readLines(search_query,
+                                                       warn = FALSE)), error = function(e) NULL)
+    if (is.null(search_JSON)) {
+      stop(paste("Unable to connect to reddit website or invalid subreddit entered"))
+    } else if (length(search_JSON$data$children)==0){
+        stop(paste("This search term returned no results or invalid subreddit entered"))
+      } else {
+      contents = search_JSON[[2]]$children
+      search_permalink = paste0("http://www.reddit.com",
+                                sapply(seq(contents), function(x) contents[[x]]$data$permalink))
+      search_num_comments = sapply(seq(contents), function(x) contents[[x]]$data$num_comments)
+      search_title = sapply(seq(contents), function(x) contents[[x]]$data$title)
+      search_score = sapply(seq(contents), function(x) contents[[x]]$data$score)
+      search_subreddit = sapply(seq(contents), function(x) contents[[x]]$data$subreddit)
+      search_link = sapply(seq(contents), function(x) contents[[x]]$data$url)
+      index = which(search_num_comments >= cn_threshold &
+                      grepl(regex_filter, search_title, ignore.case = T,
+                            perl = T))
+      if (length(index) > 0) {
+        search_date = format(as.Date(as.POSIXct(unlist(lapply(seq(contents), function(x) contents[[x]]$data$created_utc)),
+                                                origin = "1970-01-01")), "%d-%m-%y")
+
+
+        temp_dat = data.frame(date = search_date,
+                              num_comments = search_num_comments,
+                              title = search_title,
+subreddit = search_subreddit,
+                              URL = search_permalink,
+                              link = search_link,
+                              stringsAsFactors = FALSE)[index,]
+
+        cached_links = as.data.frame(rbind(cached_links,
+                                           temp_dat))
+        next_page = search_JSON$data$after
+        comm_filter = utils::tail(search_num_comments,
+                                  1)
+        search_query = paste0(search_address, "&after=",
+                              next_page)
+        page_counter = page_counter + 1
+      }
+      Sys.sleep(min(2, wait_time))
+    }
+  }
+  final_table = cached_links[!duplicated(cached_links), ]
+  if (dim(final_table)[1] == 0) {
+    cat(paste("\nNo results retrieved, should be invalid subreddit entered, down server or simply unsuccessful search query :("))
+  }
+  else {
+    remove_row = which(final_table[, 1] == "")
+    if (length(remove_row) > 0) {
+      final_table = final_table[-remove_row, ]
+    }
+    return(final_table)
+  }
+}
+
+```
+
+
+```{r}
+
+
+
+reddit_content <- function (URL, wait_time = 2) {
+    if (is.null(URL) | length(URL) == 0 | !is.character(URL)) {
+        stop("invalid URL parameter")
+    }
+    GetAttribute = function(node, feature) {
+        Attribute = node$data[[feature]]
+        replies = node$data$replies
+        reply.nodes = if (is.list(replies)) 
+            replies$data$children
+        else NULL
+        return(list(Attribute, lapply(reply.nodes, function(x) {
+            GetAttribute(x, feature)
+        })))
+    }
+    get.structure = function(node, depth = 0) {
+        if (is.null(node)) {
+            return(list())
+        }
+        filter = is.null(node$data$author)
+        replies = node$data$replies
+        reply.nodes = if (is.list(replies)) 
+            replies$data$children
+        else NULL
+        return(list(paste0(filter, " ", depth), lapply(1:length(reply.nodes), 
+            function(x) get.structure(reply.nodes[[x]], paste0(depth, 
+                "_", x)))))
+    }
+    data_extract = data.frame(id = numeric(), structure = character(), 
+        post_date = as.Date(character()), comm_date = as.Date(character()), 
+        num_comments = numeric(), subreddit = character(), upvote_prop = numeric(), 
+        post_score = numeric(), author = character(), user = character(), 
+        comment_score = numeric(), controversiality = numeric(), 
+        comment = character(), title = character(), post_text = character(), 
+        link = character(), domain = character(), URL = character())
+    pb = utils::txtProgressBar(min = 0, max = length(URL), style = 3)
+    for (i in seq(URL)) {
+        if (!grepl("^https?://(.*)", URL[i])) 
+            URL[i] = paste0("https://www.", gsub("^.*(reddit\\..*$)", 
+                "\\1", URL[i]))
+        if (!grepl("\\?ref=search_posts$", URL[i])) 
+            URL[i] = paste0(gsub("/$", "", URL[i]), "/?ref=search_posts")
+        X = paste0(gsub("\\?ref=search_posts$", "", URL[i]), 
+            ".json?limit=500")
+        raw_data = tryCatch(RJSONIO::fromJSON(readLines(X, warn = FALSE)), 
+            error = function(e) NULL)
+        if (is.null(raw_data)) {
+            Sys.sleep(min(1, wait_time))
+            raw_data = tryCatch(RJSONIO::fromJSON(readLines(X, 
+                warn = FALSE)), error = function(e) NULL)
+        }
+        if (is.null(raw_data) == FALSE) {
+            meta.node = raw_data[[1]]$data$children[[1]]$data
+            main.node = raw_data[[2]]$data$children
+            if (min(length(meta.node), length(main.node)) > 0) {
+                structure = unlist(lapply(1:length(main.node), 
+                  function(x) get.structure(main.node[[x]], x)))
+                TEMP = data.frame(id = NA, structure = gsub("FALSE ", 
+                  "", structure[!grepl("TRUE", structure)]), 
+                  post_date = format(as.Date(as.POSIXct(meta.node$created_utc, 
+                    origin = "1970-01-01")), "%d-%m-%y"), comm_date = format(as.Date(as.POSIXct(unlist(lapply(main.node, 
+                    function(x) {
+                      GetAttribute(x, "created_utc")
+                    })), origin = "1970-01-01")), "%d-%m-%y"), 
+                  num_comments = meta.node$num_comments, subreddit = ifelse(is.null(meta.node$subreddit), 
+                    "UNKNOWN", meta.node$subreddit), upvote_prop = meta.node$upvote_ratio, 
+                  post_score = meta.node$score, author = meta.node$author, 
+                  user = unlist(lapply(main.node, function(x) {
+                    GetAttribute(x, "author")
+                  })), comment_score = unlist(lapply(main.node, 
+                    function(x) {
+                      GetAttribute(x, "score")
+                    })), controversiality = unlist(lapply(main.node, 
+                    function(x) {
+                      GetAttribute(x, "controversiality")
+                    })), comment = unlist(lapply(main.node, function(x) {
+                    GetAttribute(x, "body")
+                  })), title = meta.node$title, post_text = meta.node$selftext, 
+                  link = meta.node$url, domain = meta.node$domain, 
+                  URL = URL[i], stringsAsFactors = FALSE)
+                TEMP$id = 1:nrow(TEMP)
+                if (dim(TEMP)[1] > 0 & dim(TEMP)[2] > 0) 
+                  data_extract = rbind(TEMP, data_extract)
+                else print(paste("missed", i, ":", URL[i]))
+            }
+        }
+        utils::setTxtProgressBar(pb, i)
+        Sys.sleep(min(2, wait_time))
+    }
+    data_extract[,13] <- cleaning_text_function(data_extract[,13], stopwords =   stopwords_vec)
+    close(pb)
+    return(data_extract)
+}
+
+```
+
+```{r, include=FALSE}
+
+#First attempt to create a text cleaning function, to be impro
+stopwords_vec <- c(stopwords::stopwords("en"), "don", "isn", "gt", "i", "re","removed","deleted","m","you re","we ll", "ve", "hasn","they re","id","tl dr")
+
+x<- cleaning_text_function(a)
+cleaning_text_function <- function(x) {
+  if (is.character(x)) {
+      #Put accents instead of code html (only for french)
+      Encoding(x) <- 'latin1'
+      #take out accent
+      x <- stri_trans_general(x, 'latin-ascii')
+      x <- unlist(lapply(x, function(x, stopwords = stopwords_vec) {
+        #separate words 
+        x <- unlist(strsplit(x, " "))
+        #take out internet links
+        x <- x[!grepl("\\S+www\\S+|\\S+https://\\S+|https://\\S+", x)]
+        #take out codes ASCII and ponctuation
+        x <-gsub("\n|[[:punct:]]|[\x01-\x09\x11-\x12\x14-\x1F\x7F]|gt"," ",x)
+        #take out simple alone numbers 
+        x <-gsub("(^[0-9]{1}\\s|^[0-9]{1}$|\\s{1}[0-9]{1}$|\\s{1}[0-9]{1}\\s{1})"," ",x)
+        #take out space in the beginning and end of stringg 
+        x <-gsub("(^[[:blank:]]+|[[:blank:]]+$)", "", x)
+        #lowercase
+        x <- tolower(x)
+        #take out alone letters 
+        x <-gsub("(^[a-z]{1}\\s+|^[a-z]{1}$|\\s+[a-z]{1}$|\\s+[a-z]{1}\\s+)", "", x)
+        #take out words in stopwords list
+        x <-paste(x[!x %in% stopwords], collapse = " ")
+        return(x)
+      }))
+  } else{ 
+  stop("please enter a character vector")
+  }
+  return(x)
+}
+#regex : word that we do not wish to have in the title
+#cn_threshold : number min of comments in a discussion 
+#page_threshold : number of pages on which linked will be scrapped (around 25 links per page)
+#wait_time: Waiting time to avoid being blocked by restriction
+Adresses<-reddit_urls_mod(search_terms = "federer", regex_filter = "", subreddit = "tennis",
+                   cn_threshold = 1, page_threshold = 25, sort_by = "new", time_frame= "all",wait_time = 4)
+
+#scrap the content of links and discussion 
+contenu <- reddit_content(Adresses[1:10,5], wait_time = 2)
+
+```
+
+
+```{r}
+#scrap comment of an user
+get_user_comments <-
+  function(user = "",
+           page_threshold = 5,
+           wait_time = 2) {
+    if (is.na(user) | user == "") {
+      stop("Please enter an user name")
+    }
+
+    cached_links = tibble(
+      date = as.Date(character()),
+      num_comments = numeric(),
+      title = character(),
+      subreddit = character(),
+      URL = character(),
+      comment = character(),
+      score = numeric()
+    )
+
+    user_address = search_query = paste0("https://www.reddit.com/user/",
+                                         user,
+                                         "/comments/.json")
+    next_page = ""
+    page_counter = 0
+
+    withProgress(message = 'Work in progress', value = 0, {
+    while (is.null(next_page) == FALSE &
+           page_counter < page_threshold) {
+      search_JSON = tryCatch(
+        RJSONIO::fromJSON(readLines(search_query,
+                                    warn = FALSE)),
+        error = function(e)
+          NULL
+      )
+      if (is.null(search_JSON)) {
+        cat(paste("Cannot connect to the website, skipping...\n"))
+        break
+      } else if (rlang::is_empty(search_JSON[[2]]$children)) {
+        break
+      } else {
+        contents = search_JSON[[2]]$children
+        search_permalink = paste0("http://www.reddit.com",
+                                  sapply(seq(contents),
+                                         function(x)
+                                           contents[[x]]$data$permalink))
+        search_num_comments = sapply(seq(contents), function(x)
+          contents[[x]]$data$num_comments)
+        search_title = sapply(seq(contents), function(x)
+          contents[[x]]$data$link_title)
+        search_score = sapply(seq(contents), function(x)
+          contents[[x]]$data$score)
+        search_subreddit = sapply(seq(contents), function(x)
+          contents[[x]]$data$subreddit)
+        search_comment = sapply(seq(contents), function(x)
+          contents[[x]]$data$body)
+        search_date = format(as.POSIXct(unlist(
+          lapply(seq(contents),
+                 function(x)
+                   contents[[x]]$data$created_utc)
+        ),
+        origin = "1970-01-01 00:00"),
+        "%Y-%m-%d %H:%M")
+
+        temp_dat = tibble(
+          date = search_date,
+          num_comments = search_num_comments,
+          title = search_title,
+          subreddit = search_subreddit,
+          URL = search_permalink,
+          comment = search_comment,
+          score = search_score
+        )[c(seq(25 * (page_counter + 1))), ]
+
+        cached_links = rbind(cached_links, temp_dat)
+
+        next_page = search_JSON$data$after
+        comm_filter = utils::tail(search_num_comments, 1)
+        search_query = paste0(user_address,
+                              "?count=",
+                              (page_counter + 1) * 25,
+                              "&after=",
+                              next_page)
+
+        page_counter = page_counter + 1
+        incProgress(amount = 1/page_threshold)
+        Sys.sleep(min(2, wait_time))
+      }
+
+    }
+    })
+    final_table = cached_links[!duplicated(cached_links),]
+    if (dim(final_table)[1] == 0) {
+      cat(paste("\nNo results retrieved, check your query"))
+    }
+    else {
+      remove_row = which(final_table[, 1] == "")
+      if (length(remove_row) > 0) {
+        final_table = final_table[-remove_row,]
+      }
+      return(final_table)
+    }
+  }
+
+
+
+user1 <- get_user_comments("bencbartlett", 10)
+
+user1 <- as_tibble(sapply(user1, cleaning_text_function ))
+
+
+```
+
+
+```{r}
+
+#text mining (to be pursued)
+
+# load 
+user1 <- get_user_comments("KassGrain", 50)
+user2 <- get_user_comments("EHStormcrow", 50)
+user3 <- get_user_comments(user = "sylsau", 50)
+use1 <- as_tibble(sapply(user1, cleaning_text_function))
+use2 <- as_tibble(sapply(user2, cleaning_text_function))
+use3 <- as_tibble(sapply(user3, cleaning_text_function))
+user <- tibble(user = c(rep("1", nrow(use1)), rep("2", nrow(use2)), rep("3", nrow(use3))))
+df <- cbind(rbind(use1, use2,use3), user)
+# create a document term matrix 
+dtm <- CreateDtm(doc_vec = df[[6]] , # character vector of documents
+                 doc_names = df[[8]], # document names
+                 ngram_window = c(1, 2), # minimum and maximum n-gram length
+                 stopword_vec = c(stopwords::stopwords("en"), # stopwords from tm
+                                  stopwords::stopwords(source = "smart")), # this is the default value
+                 lower = TRUE, # lowercase - this is the default value
+                 remove_punctuation = TRUE, # punctuation - this is the default
+                 remove_numbers = TRUE, # numbers - this is the default
+                 verbose = FALSE, # Turn off status bar for this demo
+                 cpus = 2) # default is all available cpus on the system
+```
+
+
+```{r}
+#première ébauche telecharger les images de chaque post qui possède des images 
+#le but c'est de plotter une mosaique du fil à la fin 
+#je n'arrive pas à installer le package rcvg chez moi 
+
+art <- reddit_urls_mod(search_terms = "hello", regex_filter = "", subreddit = "art",
+                   cn_threshold = 1, page_threshold = 1, sort_by = "top",time_frame="week", wait_time = 4)
+tiger <- sapply(art[[6]], function(x) image_read_svg(x, width = 300, height = 300))
+image_append(c(tiger$`https://i.redd.it/lgmmrijb1wx31.jpg`,
+                    tiger$`https://i.redd.it/89kxzjqeyvx31.png`,
+                    tiger$`https://i.redd.it/9kku7weexvx31.jpg`,
+                    tiger$`https://i.redd.it/rekbwi6kjvx31.jpg`))
+```
+
+
